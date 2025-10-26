@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Container Deployment & Resource Manager</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+    <style>
+        /* --- General Styles --- */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f7f9;
+            color: #333;
+        }
+
+        .container-manager {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #007bff;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        /* --- Alerting Section --- */
+        .alerts-panel {
+            background-color: #ffcccc;
+            border: 1px solid #ff9999;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            display: none; /* Initially hidden */
+        }
+
+        .alert-item {
+            color: #cc0000;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        /* --- Container List & Controls --- */
+        .container-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .container-card {
+            background-color: #ffffff;
+            border: 1px solid #ddd;
+            border-left: 5px solid #007bff;
+            padding: 15px;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            transition: transform 0.2s;
+        }
+
+        .container-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        h2 {
+            margin-top: 0;
+            color: #007bff;
+            font-size: 1.2em;
+        }
+
+        .health-status {
+            font-weight: bold;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.9em;
+            display: inline-block;
+            margin-bottom: 10px;
+        }
+
+        .status-up {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        .status-down {
+            background-color: #f44336;
+            color: white;
+        }
+
+        .status-restarting {
+            background-color: #ff9800;
+            color: white;
+        }
+
+        .metrics p {
+            margin: 5px 0;
+            font-size: 0.95em;
+        }
+
+        .actions {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .actions button {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.2s;
+            flex-grow: 1;
+        }
+
+        .actions .scale-up {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .actions .scale-down {
+            background-color: #dc3545;
+            color: white;
+        }
+
+        .actions .restart {
+            background-color: #ffc107;
+            color: #333;
+        }
+
+        .actions button:hover {
+            opacity: 0.9;
+        }
+
+        /* --- Global Metrics Chart --- */
+        .chart-section {
+            margin-top: 40px;
+        }
+
+        .chart-section h2 {
+            text-align: center;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .chart-container {
+            background-color: #ffffff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container-manager">
+        <h1>Container Deployment & Resource Manager Simulator</h1>
+
+        <div class="alerts-panel" id="alertsPanel">
+            <h3>🔴 Active Alerts</h3>
+            <div id="alertsList">
+                </div>
+        </div>
+
+        <div class="container-list" id="containerList">
+            </div>
+
+        <div class="chart-section">
+            <h2>Aggregate Resource Usage (Last 60s)</h2>
+            <div class="chart-container">
+                <canvas id="resourceChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const INITIAL_CONTAINERS = [
+            { id: 1, name: 'Web-App-A', replicas: 2, cpu: 15, memory: 30, status: 'Up' },
+            { id: 2, name: 'Database-B', replicas: 1, cpu: 45, memory: 60, status: 'Up' }
+        ];
+
+        const MAX_HISTORY_POINTS = 60; // 60 seconds of history
+        const METRIC_INTERVAL_MS = 1000; // Update every 1 second
+        const ALERT_CPU_THRESHOLD = 75; // %
+        const ALERT_MEMORY_THRESHOLD = 80; // %
+
+        // --- State Management ---
+        let containers = INITIAL_CONTAINERS.map(c => ({
+            ...c,
+            // Track individual container metrics history (for potential future expansion)
+            history: { cpu: [], memory: [] }
+        }));
+        let globalMetricsHistory = {
+            labels: [], // Time labels
+            cpu: [],    // Aggregate CPU usage
+            memory: []  // Aggregate Memory usage
+        };
+        let activeAlerts = new Map(); // Map to store unique alerts
+
+        // --- Chart.js Instance ---
+        let resourceChart;
+
+        // --- Core Functions ---
+
+        /**
+         * Simulates real-time resource usage fluctuations.
+         * @param {number} currentValue - The current resource usage value.
+         * @returns {number} The new simulated value.
+         */
+        function simulateResourceChange(currentValue) {
+            // Random fluctuation between -5 and +5, capped between 0 and 100
+            const fluctuation = Math.random() * 10 - 5;
+            let newValue = currentValue + fluctuation;
+            return Math.min(100, Math.max(0, newValue));
+        }
+
+        /**
+         * Renders the entire list of container cards.
+         */
+        function renderContainers() {
+            const listElement = document.getElementById('containerList');
+            listElement.innerHTML = containers.map(container => {
+                const totalCpu = (container.cpu * container.replicas).toFixed(1);
+                const totalMemory = (container.memory * container.replicas).toFixed(1);
+                const statusClass = container.status === 'Up' ? 'status-up' :
+                                    container.status === 'Down' ? 'status-down' :
+                                    'status-restarting';
+
+                return `
+                    <div class="container-card" id="card-${container.id}">
+                        <h2>${container.name}</h2>
+                        <span class="health-status ${statusClass}">${container.status}</span>
+                        <p><strong>Replicas:</strong> <span id="replicas-${container.id}">${container.replicas}</span></p>
+                        <div class="metrics">
+                            <p><strong>Total CPU:</strong> <span id="cpu-${container.id}">${totalCpu}%</span></p>
+                            <p><strong>Total Memory:</strong> <span id="memory-${container.id}">${totalMemory}%</span></p>
+                        </div>
+                        <div class="actions">
+                            <button class="scale-up" onclick="scaleContainer(${container.id}, 1)">Scale Up (+1)</button>
+                            <button class="scale-down" onclick="scaleContainer(${container.id}, -1)">Scale Down (-1)</button>
+                            <button class="restart" onclick="restartContainer(${container.id})">Restart</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        /**
+         * Updates the metrics display for a single container without re-rendering the whole list.
+         * @param {object} container - The container state object.
+         */
+        function updateContainerCard(container) {
+            const totalCpu = (container.cpu * container.replicas).toFixed(1);
+            const totalMemory = (container.memory * container.replicas).toFixed(1);
+            const statusClass = container.status === 'Up' ? 'status-up' :
+                                container.status === 'Down' ? 'status-down' :
+                                'status-restarting';
+
+            document.getElementById(`replicas-${container.id}`).textContent = container.replicas;
+            document.getElementById(`cpu-${container.id}`).textContent = `${totalCpu}%`;
+            document.getElementById(`memory-${container.id}`).textContent = `${totalMemory}%`;
+
+            const statusEl = document.querySelector(`#card-${container.id} .health-status`);
+            statusEl.textContent = container.status;
+            statusEl.className = `health-status ${statusClass}`;
+        }
+
+        // --- Deployment Actions ---
+
+        /**
+         * Scales a container up or down.
+         * @param {number} id - Container ID.
+         * @param {number} delta - Amount to change replicas by (+1 or -1).
+         */
+        function scaleContainer(id, delta) {
+            const container = containers.find(c => c.id === id);
+            if (!container) return;
+
+            const newReplicas = container.replicas + delta;
+            if (newReplicas >= 0) {
+                container.replicas = newReplicas;
+                updateContainerCard(container);
+                console.log(`Scaled ${container.name} to ${newReplicas} replicas.`);
+            } else {
+                alert(`Cannot scale down ${container.name} below 0 replicas.`);
+            }
+        }
+
+        /**
+         * Simulates a container restart process.
+         * @param {number} id - Container ID.
+         */
+        function restartContainer(id) {
+            const container = containers.find(c => c.id === id);
+            if (!container) return;
+
+            container.status = 'Restarting';
+            updateContainerCard(container);
+            console.log(`Initiated restart for ${container.name}.`);
+
+            // Simulate the restart taking 3 seconds
+            setTimeout(() => {
+                container.status = 'Up';
+                // Upon restart, metrics temporarily drop (better performance)
+                container.cpu = Math.max(5, container.cpu * 0.5);
+                container.memory = Math.max(10, container.memory * 0.7);
+                updateContainerCard(container);
+                console.log(`${container.name} restart complete.`);
+            }, 3000);
+        }
+
+        // --- Alerting Logic ---
+
+        /**
+         * Checks the total resource consumption against thresholds and triggers/clears alerts.
+         * @param {number} totalCpu - The total aggregate CPU usage.
+         * @param {number} totalMemory - The total aggregate Memory usage.
+         */
+        function checkAlerts(totalCpu, totalMemory) {
+            const cpuKey = 'high_cpu';
+            const memKey = 'high_memory';
+
+            // CPU Alerting
+            if (totalCpu > ALERT_CPU_THRESHOLD) {
+                if (!activeAlerts.has(cpuKey)) {
+                    activeAlerts.set(cpuKey, `Aggregate CPU usage (${totalCpu.toFixed(1)}%) is above the ${ALERT_CPU_THRESHOLD}% threshold!`);
+                }
+            } else {
+                activeAlerts.delete(cpuKey);
+            }
+
+            // Memory Alerting
+            if (totalMemory > ALERT_MEMORY_THRESHOLD) {
+                if (!activeAlerts.has(memKey)) {
+                    activeAlerts.set(memKey, `Aggregate Memory usage (${totalMemory.toFixed(1)}%) is above the ${ALERT_MEMORY_THRESHOLD}% threshold!`);
+                }
+            } else {
+                activeAlerts.delete(memKey);
+            }
+
+            renderAlerts();
+        }
+
+        /**
+         * Renders the alert panel based on the activeAlerts Map.
+         */
+        function renderAlerts() {
+            const panel = document.getElementById('alertsPanel');
+            const list = document.getElementById('alertsList');
+
+            if (activeAlerts.size > 0) {
+                panel.style.display = 'block';
+                list.innerHTML = Array.from(activeAlerts.values())
+                    .map(msg => `<div class="alert-item">⚠️ ${msg}</div>`)
+                    .join('');
+            } else {
+                panel.style.display = 'none';
+                list.innerHTML = '';
+            }
+        }
+
+        // --- Metric & Chart Updates ---
+
+        /**
+         * Initializes the Chart.js chart.
+         */
+        function initChart() {
+            const ctx = document.getElementById('resourceChart').getContext('2d');
+            resourceChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: globalMetricsHistory.labels,
+                    datasets: [
+                        {
+                            label: 'Total CPU Usage (%)',
+                            data: globalMetricsHistory.cpu,
+                            borderColor: '#007bff',
+                            backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.2,
+                            pointRadius: 0
+                        },
+                        {
+                            label: 'Total Memory Usage (%)',
+                            data: globalMetricsHistory.memory,
+                            borderColor: '#28a745',
+                            backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.2,
+                            pointRadius: 0
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    scales: {
+                        y: {
+                            min: 0,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: 'Resource Usage (%)'
+                            }
+                        },
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Time (seconds ago)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        title: {
+                            display: false
+                        }
+                    },
+                    animation: {
+                        duration: METRIC_INTERVAL_MS - 50, // Smoother update
+                        easing: 'linear'
+                    }
+                }
+            });
+        }
+
+        /**
+         * The main loop for simulating metrics, updating the UI, and checking alerts.
+         */
+        function updateMetrics() {
+            let totalCpu = 0;
+            let totalMemory = 0;
+
+            // 1. Update State (Simulate Fluctuations) and calculate total
+            containers.forEach(container => {
+                if (container.status === 'Up') {
+                    // Fluctuate the base usage
+                    container.cpu = simulateResourceChange(container.cpu);
+                    container.memory = simulateResourceChange(container.memory);
+
+                    // Add to aggregate total (Usage * Replicas)
+                    totalCpu += container.cpu * container.replicas;
+                    totalMemory += container.memory * container.replicas;
+
+                    // Update the card display
+                    updateContainerCard(container);
+                } else {
+                    // If not Up, usage is effectively 0 for aggregation
+                    updateContainerCard(container); // to ensure status is rendered
+                }
+            });
+
+            // Cap the totals at 100% just for display context, though the underlying
+            // total is what drives the alert (and could theoretically exceed 100%)
+            const displayTotalCpu = Math.min(100, totalCpu).toFixed(1);
+            const displayTotalMemory = Math.min(100, totalMemory).toFixed(1);
+
+            // 2. Update Global Metrics History
+            const now = new Date();
+            const timeLabel = `${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+            globalMetricsHistory.labels.push(timeLabel);
+            globalMetricsHistory.cpu.push(displayTotalCpu);
+            globalMetricsHistory.memory.push(displayTotalMemory);
+
+            // Trim history to the maximum number of points
+            if (globalMetricsHistory.labels.length > MAX_HISTORY_POINTS) {
+                globalMetricsHistory.labels.shift();
+                globalMetricsHistory.cpu.shift();
+                globalMetricsHistory.memory.shift();
+            }
+
+            // 3. Update Chart
+            if (resourceChart) {
+                resourceChart.update();
+            }
+
+            // 4. Check Alerts
+            checkAlerts(totalCpu, totalMemory);
+        }
+
+        // --- Initialization ---
+
+        function init() {
+            // 1. Initial Render
+            renderContainers();
+
+            // 2. Initialize Chart
+            initChart();
+
+            // 3. Start the Metric Update Loop
+            setInterval(updateMetrics, METRIC_INTERVAL_MS);
+        }
+
+        // Wait for the DOM to be fully loaded before starting
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+
+</body>
+</html>
