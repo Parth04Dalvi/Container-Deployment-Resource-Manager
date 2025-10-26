@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Container Deployment & Resource Manager</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Chart.js library for real-time metrics visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom styles for modal overlay */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 50;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 font-sans p-4 sm:p-8">
+
+    <div class="max-w-7xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl border border-gray-100">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-blue-600 mb-6 border-b-2 pb-3 text-center">
+            Container Resource Manager Simulator
+        </h1>
+
+        <!-- Alert Panel -->
+        <div class="alerts-panel bg-red-100 border border-red-400 p-4 rounded-lg mb-6 shadow-sm hidden" id="alertsPanel">
+            <h3 class="text-xl font-bold text-red-700 flex items-center mb-2">
+                <svg class="w-6 h-6 mr-2 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.3 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                Active Global Alerts
+            </h3>
+            <div id="alertsList" class="space-y-1">
+                <!-- Alerts will be injected here -->
+            </div>
+        </div>
+
+        <!-- Main Container Display -->
+        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Deployed Services</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="containerList">
+            <!-- Container cards will be injected here -->
+        </div>
+
+        <!-- Global Metrics Chart -->
+        <div class="chart-section mt-10">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4 text-center">Aggregate Resource Usage (Last 60s)</h2>
+            <div class="chart-container bg-white p-6 rounded-lg shadow-xl border border-gray-200">
+                <canvas id="resourceChart" class="w-full"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail History Modal -->
+    <div id="detailModal" class="modal-overlay" onclick="if(event.target.id === 'detailModal') closeModal()">
+        <div class="bg-white rounded-xl shadow-2xl w-11/12 md:w-3/4 max-w-4xl p-6 relative">
+            <button onclick="closeModal()" class="absolute top-3 right-3 text-gray-500 hover:text-gray-900 text-2xl font-bold">&times;</button>
+            <h3 id="detailContainerName" class="text-2xl font-bold text-blue-600 mb-4 border-b pb-2"></h3>
+            <p class="text-sm text-gray-600 mb-4">Individual resource consumption history for the last minute.</p>
+            <canvas id="detailResourceChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const INITIAL_CONTAINERS = [
+            // Added maxCpu/maxMemory for Feature 2 and suppressAlerts for Feature 1
+            { id: 1, name: 'Auth-API', replicas: 2, cpu: 15, memory: 30, status: 'Up', maxCpu: 65, maxMemory: 75 },
+            { id: 2, name: 'Data-Store-B', replicas: 1, cpu: 45, memory: 60, status: 'Up', maxCpu: 85, maxMemory: 90 },
+            { id: 3, name: 'Payment-Worker', replicas: 3, cpu: 10, memory: 20, status: 'Up', maxCpu: 40, maxMemory: 50 }
+        ];
+
+        const MAX_HISTORY_POINTS = 60; // 60 seconds of history
+        const METRIC_INTERVAL_MS = 1000; // Update every 1 second
+        const ALERT_CPU_THRESHOLD = 75; // % Aggregate
+        const ALERT_MEMORY_THRESHOLD = 80; // % Aggregate
+
+        // --- State Management ---
+        let containers = INITIAL_CONTAINERS.map(c => ({
+            ...c,
+            // Added suppressAlerts state for Feature 1
+            suppressAlerts: false,
+            // History structure for Feature 3
+            history: { labels: [], cpu: [], memory: [] }
+        }));
+        let globalMetricsHistory = {
+            labels: [], 
+            cpu: [],    
+            memory: []  
+        };
+        let activeAlerts = new Map(); 
+
+        // --- Chart.js Instances ---
+        let resourceChart;
+        let detailChart;
+
+        // --- Core Functions: Simulation and State Update ---
+
+        /**
+         * Simulates real-time resource usage fluctuations.
+         */
+        function simulateResourceChange(currentValue) {
+            const fluctuation = (Math.random() * 8) - 4; // Fluctuation between -4 and +4
+            let newValue = currentValue + fluctuation;
+            return Math.min(100, Math.max(0, newValue));
+        }
+
+        /**
+         * Renders the entire list of container cards (used for initial render and state toggles).
+         */
+        function renderContainers() {
+            const listElement = document.getElementById('containerList');
+            listElement.innerHTML = containers.map(container => {
+                const totalCpu = (container.cpu * container.replicas);
+                const totalMemory = (container.memory * container.replicas);
+
+                let statusClass = 'bg-green-500';
+                let statusText = container.status;
+
+                if (container.status === 'Critical') {
+                    statusClass = 'bg-red-700'; // Feature 2: Critical Status
+                    statusText = 'Critical ⚠️';
+                } else if (container.status === 'Restarting') {
+                    statusClass = 'bg-yellow-500';
+                } else if (container.status === 'Up') {
+                    statusClass = 'bg-green-500';
+                }
+
+                // Feature 1: Alert Suppression style
+                const cardStyle = container.suppressAlerts ? 'border-l-8 border-gray-400 opacity-70' : 'border-l-8 border-blue-500';
+
+                return `
+                    <div class="container-card bg-white p-5 rounded-lg shadow-md ${cardStyle} transition duration-300 hover:shadow-lg cursor-pointer" 
+                         id="card-${container.id}">
+                        
+                        <div onclick="showContainerDetail(${container.id})" class="mb-3">
+                            <h2 class="text-xl font-bold text-gray-800">${container.name}</h2>
+                            <span class="health-status text-white px-2 py-0.5 rounded-full text-xs font-semibold ${statusClass}">
+                                ${statusText}
+                            </span>
+                            ${container.suppressAlerts ? '<span class="ml-2 text-sm text-gray-600 italic">(Alerts Suppressed)</span>' : ''}
+                        </div>
+
+                        <p class="text-sm text-gray-600 mb-2"><strong>Replicas:</strong> <span id="replicas-${container.id}">${container.replicas}</span></p>
+                        
+                        <div class="metrics text-sm">
+                            <!-- Feature 2: Configurable Resource Limits display -->
+                            <p class="mb-1">
+                                <strong>CPU:</strong> 
+                                <span id="cpu-base-${container.id}" class="font-medium">${container.cpu.toFixed(1)}%</span> / ${container.maxCpu}% Base | 
+                                <span class="font-bold text-blue-600">${totalCpu.toFixed(1)}%</span> Total
+                            </p>
+                            <p>
+                                <strong>Memory:</strong> 
+                                <span id="memory-base-${container.id}" class="font-medium">${container.memory.toFixed(1)}%</span> / ${container.maxMemory}% Base | 
+                                <span class="font-bold text-blue-600">${totalMemory.toFixed(1)}%</span> Total
+                            </p>
+                        </div>
+
+                        <div class="actions mt-4 flex flex-col space-y-2">
+                            <div class="flex space-x-2">
+                                <button class="scale-up bg-green-500 text-white p-2 rounded-md hover:bg-green-600 transition flex-1 text-sm" onclick="scaleContainer(${container.id}, 1)">Scale Up (+1)</button>
+                                <button class="scale-down bg-red-500 text-white p-2 rounded-md hover:bg-red-600 transition flex-1 text-sm" onclick="scaleContainer(${container.id}, -1)">Scale Down (-1)</button>
+                            </div>
+                            <button class="restart bg-yellow-500 text-gray-800 p-2 rounded-md hover:bg-yellow-600 transition text-sm" onclick="restartContainer(${container.id})">Restart</button>
+                            <!-- Feature 1: Alert Suppression Button -->
+                            <button class="toggle-suppress ${container.suppressAlerts ? 'bg-gray-200 text-gray-700' : 'bg-blue-100 text-blue-600'} p-2 rounded-md hover:bg-opacity-80 transition text-xs" 
+                                    onclick="toggleAlertSuppression(${container.id})">
+                                ${container.suppressAlerts ? 'Disable Maintenance Mode' : 'Enable Maintenance Mode (Suppress Alerts)'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        /**
+         * Updates the metrics display for a single container without re-rendering the whole list.
+         */
+        function updateContainerCard(container) {
+            const totalCpu = (container.cpu * container.replicas).toFixed(1);
+            const totalMemory = (container.memory * container.replicas).toFixed(1);
+
+            const statusEl = document.querySelector(`#card-${container.id} .health-status`);
+            if (statusEl) {
+                let statusClass = 'bg-green-500';
+                let statusText = container.status;
+
+                if (container.status === 'Critical') {
+                    statusClass = 'bg-red-700';
+                    statusText = 'Critical ⚠️';
+                } else if (container.status === 'Restarting') {
+                    statusClass = 'bg-yellow-500';
+                } else if (container.status === 'Up') {
+                    statusClass = 'bg-green-500';
+                }
+
+                statusEl.textContent = statusText;
+                statusEl.className = `health-status text-white px-2 py-0.5 rounded-full text-xs font-semibold ${statusClass}`;
+            }
+
+            // Update metrics and replicas
+            document.getElementById(`replicas-${container.id}`).textContent = container.replicas;
+            document.getElementById(`cpu-base-${container.id}`).textContent = `${container.cpu.toFixed(1)}%`;
+            document.getElementById(`memory-base-${container.id}`).textContent = `${container.memory.toFixed(1)}%`;
+            // Note: Total usage display is updated implicitly by updating base usage in renderContainers logic (best to re-render)
+            // For simplicity and to update the whole card's styling (suppression/critical), we call renderContainers, but the logic above updates the specific elements if we were avoiding full re-render.
+        }
+
+        // --- Deployment Actions ---
+
+        function scaleContainer(id, delta) {
+            const container = containers.find(c => c.id === id);
+            if (!container) return;
+
+            const newReplicas = container.replicas + delta;
+            if (newReplicas >= 0) {
+                container.replicas = newReplicas;
+                // Full render to update Total CPU/Memory display correctly
+                renderContainers(); 
+            } else {
+                console.warn(`Cannot scale down ${container.name} below 0 replicas.`);
+            }
+        }
+
+        function restartContainer(id) {
+            const container = containers.find(c => c.id === id);
+            if (!container) return;
+
+            container.status = 'Restarting';
+            renderContainers(); // Update status immediately
+
+            setTimeout(() => {
+                container.status = 'Up';
+                // Upon restart, metrics temporarily drop (better performance)
+                container.cpu = Math.max(5, container.cpu * 0.5);
+                container.memory = Math.max(10, container.memory * 0.7);
+                renderContainers(); // Update status and metrics
+            }, 3000);
+        }
+
+        // --- Feature 1: Alert Suppression ---
+        function toggleAlertSuppression(id) {
+            const container = containers.find(c => c.id === id);
+            if (container) {
+                container.suppressAlerts = !container.suppressAlerts;
+                renderContainers(); 
+            }
+        }
+
+        // --- Alerting Logic ---
+        function checkAlerts(totalCpu, totalMemory) {
+            const cpuKey = 'high_cpu';
+            const memKey = 'high_memory';
+
+            // CPU Alerting
+            if (totalCpu > ALERT_CPU_THRESHOLD) {
+                if (!activeAlerts.has(cpuKey)) {
+                    activeAlerts.set(cpuKey, `Aggregate CPU usage (${totalCpu.toFixed(1)}%) is above the ${ALERT_CPU_THRESHOLD}% threshold!`);
+                }
+            } else {
+                activeAlerts.delete(cpuKey);
+            }
+
+            // Memory Alerting
+            if (totalMemory > ALERT_MEMORY_THRESHOLD) {
+                if (!activeAlerts.has(memKey)) {
+                    activeAlerts.set(memKey, `Aggregate Memory usage (${totalMemory.toFixed(1)}%) is above the ${ALERT_MEMORY_THRESHOLD}% threshold!`);
+                }
+            } else {
+                activeAlerts.delete(memKey);
+            }
+
+            renderAlerts();
+        }
+
+        function renderAlerts() {
+            const panel = document.getElementById('alertsPanel');
+            const list = document.getElementById('alertsList');
+
+            if (activeAlerts.size > 0) {
+                panel.classList.remove('hidden');
+                list.innerHTML = Array.from(activeAlerts.values())
+                    .map(msg => `<div class="alert-item text-red-600 text-sm">🚨 ${msg}</div>`)
+                    .join('');
+            } else {
+                panel.classList.add('hidden');
+                list.innerHTML = '';
+            }
+        }
+
+        // --- Feature 3: Detail View Modal Logic ---
+
+        function initDetailChart(container) {
+            const ctx = document.getElementById('detailResourceChart').getContext('2d');
+            
+            if (detailChart) {
+                detailChart.destroy();
+            }
+
+            detailChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: container.history.labels,
+                    datasets: [
+                        {
+                            label: 'CPU Usage (%)',
+                            data: container.history.cpu,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.2,
+                            pointRadius: 0
+                        },
+                        {
+                            label: 'Memory Usage (%)',
+                            data: container.history.memory,
+                            borderColor: '#10b981',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.2,
+                            pointRadius: 0
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    scales: {
+                        y: { min: 0, max: 100, title: { display: true, text: 'Resource Usage (%)' } },
+                    },
+                    plugins: { legend: { position: 'top' } }
+                }
+            });
+        }
+
+        function showContainerDetail(id) {
+            const container = containers.find(c => c.id === id);
+            if (!container) return;
+
+            document.getElementById('detailContainerName').textContent = `Metrics for ${container.name} (ID: ${container.id})`;
+            document.getElementById('detailModal').style.display = 'flex';
+            
+            // Wait for modal to display before initializing chart context
+            setTimeout(() => {
+                initDetailChart(container);
+            }, 10); 
+        }
+
+        function closeModal() {
+            document.getElementById('detailModal').style.display = 'none';
+        }
+
+        // --- Metric & Chart Updates ---
+
+        function initChart() {
+            const ctx = document.getElementById('resourceChart').getContext('2d');
+            resourceChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: globalMetricsHistory.labels,
+                    datasets: [
+                        { label: 'Total CPU Usage (%)', data: globalMetricsHistory.cpu, borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', borderWidth: 2, tension: 0.2, pointRadius: 0 },
+                        { label: 'Total Memory Usage (%)', data: globalMetricsHistory.memory, borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', borderWidth: 2, tension: 0.2, pointRadius: 0 }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true,
+                    scales: { y: { min: 0, max: 100, title: { display: true, text: 'Resource Usage (%)' } } },
+                    plugins: { legend: { position: 'top' } },
+                    animation: { duration: METRIC_INTERVAL_MS - 50, easing: 'linear' }
+                }
+            });
+        }
+
+        /**
+         * The main loop for simulating metrics, updating the UI, and checking alerts.
+         */
+        function updateMetrics() {
+            let totalCpuAggregated = 0;
+            let totalMemoryAggregated = 0;
+
+            const now = new Date();
+            const timeLabel = `${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+            // 1. Update State, Check Critical Status (Feature 2) and calculate aggregated total (Feature 1 exclusion)
+            containers.forEach(container => {
+                if (container.status === 'Up' || container.status === 'Critical') {
+                    // Simulate fluctuation
+                    container.cpu = simulateResourceChange(container.cpu);
+                    container.memory = simulateResourceChange(container.memory);
+
+                    // Feature 2: Check for Critical status against max limits
+                    if (container.cpu > container.maxCpu || container.memory > container.maxMemory) {
+                        container.status = 'Critical';
+                    } else if (container.status === 'Critical' && container.cpu < container.maxCpu && container.memory < container.maxMemory) {
+                        container.status = 'Up'; // Auto-recover
+                    }
+
+                    // Feature 3: Store individual history
+                    container.history.labels.push(timeLabel);
+                    container.history.cpu.push(container.cpu.toFixed(1));
+                    container.history.memory.push(container.memory.toFixed(1));
+                    
+                    // Trim history
+                    if (container.history.labels.length > MAX_HISTORY_POINTS) {
+                        container.history.labels.shift();
+                        container.history.cpu.shift();
+                        container.history.memory.shift();
+                    }
+
+                    // Feature 1: Check for alert suppression before aggregating
+                    if (!container.suppressAlerts) {
+                        // Aggregate total (Usage * Replicas) for global alert check
+                        totalCpuAggregated += container.cpu * container.replicas;
+                        totalMemoryAggregated += container.memory * container.replicas;
+                    }
+                }
+                
+                // Update the card display
+                // Only use partial update here to avoid full DOM redraw every second
+                updateContainerCard(container); 
+            });
+
+            // 2. Update Global Metrics History (Capped at 100% for display)
+            const displayTotalCpu = Math.min(100, totalCpuAggregated).toFixed(1);
+            const displayTotalMemory = Math.min(100, totalMemoryAggregated).toFixed(1);
+
+            globalMetricsHistory.labels.push(timeLabel);
+            globalMetricsHistory.cpu.push(displayTotalCpu);
+            globalMetricsHistory.memory.push(displayTotalMemory);
+
+            // Trim global history
+            if (globalMetricsHistory.labels.length > MAX_HISTORY_POINTS) {
+                globalMetricsHistory.labels.shift();
+                globalMetricsHistory.cpu.shift();
+                globalMetricsHistory.memory.shift();
+            }
+
+            // 3. Update Chart
+            if (resourceChart) {
+                resourceChart.update();
+            }
+
+            // 4. Check Global Alerts
+            checkAlerts(totalCpuAggregated, totalMemoryAggregated);
+        }
+
+        // --- Initialization ---
+
+        function init() {
+            // 1. Initial Render
+            renderContainers();
+
+            // 2. Initialize Global Chart
+            initChart();
+
+            // 3. Start the Metric Update Loop
+            setInterval(updateMetrics, METRIC_INTERVAL_MS);
+        }
+
+        // Start when DOM is ready
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+
+</body>
+</html>
