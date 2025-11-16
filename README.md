@@ -62,7 +62,3 @@ This panel displays individual container deployments.
 * The **red alerts panel** appears only when a defined threshold (CPU > 75% or Memory > 80%) is breached.
 * **To trigger an alert:** Use the **Scale Up** button repeatedly on one or more containers until the aggregate usage pushes the total percentage over the limit.
 * **To clear an alert:** Use the **Scale Down** button to bring the aggregate usage back below the threshold.
-
-## 📂 File Structure
-
-The entire project is contained within one file:
