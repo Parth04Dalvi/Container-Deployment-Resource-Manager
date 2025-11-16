@@ -1,4 +1,4 @@
-# Container-Deployment-Resource-Manager
+# Container Deployment Resource Manager
 
 # 🚀 Container Deployment & Resource Manager Simulator
 
